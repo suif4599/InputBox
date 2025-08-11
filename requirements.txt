@@ -1,0 +1,5 @@
+pynput==1.8.1
+PyQt6==6.9.1
+pyqt6_sip==13.10.2
+pygobject==3.50.1
+psutil==7.0.0
