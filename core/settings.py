@@ -2,7 +2,8 @@ import sys
 import os
 import subprocess
 from PyQt6.QtWidgets import (QVBoxLayout, QDialog, QCheckBox, QLabel, QHBoxLayout,
-                             QPushButton, QKeySequenceEdit, QMessageBox, QComboBox)
+                             QPushButton, QKeySequenceEdit, QMessageBox, QComboBox,
+                             QFileDialog, QFrame)
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtCore import QSettings
 
@@ -11,6 +12,51 @@ if TYPE_CHECKING:
     from .app import TrayInputApp
 
 from .tools import *
+
+
+def load_and_validate_settings():
+    """Load settings from file and validate/filter conflicting options."""
+    config_path = os.path.join(ROOT, "input-box.config")
+    settings = QSettings(config_path, QSettings.Format.IniFormat)
+    
+    # Flag to track if we need to save after validation
+    needs_save = False
+    
+    # Validate auto file linking dependency on auto paste
+    auto_file_link = settings.value("auto_file_link", False, bool)
+    auto_paste = settings.value("auto_paste", True, bool)
+    
+    if auto_file_link and not auto_paste:
+        logger.warning("Auto file linking requires auto paste - disabling auto file linking")
+        settings.setValue("auto_file_link", False)
+        needs_save = True
+    
+    # Validate target directory exists
+    target_directory = settings.value("target_directory", ROOT, str)
+    if not os.path.exists(target_directory):
+        logger.warning(f"Target directory {target_directory} does not exist - falling back to ROOT")
+        settings.setValue("target_directory", ROOT)
+        needs_save = True
+    
+    # Save if validation made changes
+    if needs_save:
+        settings.sync()
+        logger.info("Settings validated and conflicts resolved")
+    
+    return settings
+
+
+def save_settings_to_file(settings_dict):
+    """Save settings dictionary to file."""
+    config_path = os.path.join(ROOT, "input-box.config")
+    settings = QSettings(config_path, QSettings.Format.IniFormat)
+    
+    for key, value in settings_dict.items():
+        settings.setValue(key, value)
+    
+    settings.sync()
+    logger.info("Settings saved to file")
+
 
 class SettingsDialog(QDialog):
     def __init__(self, parent: "TrayInputApp"):
@@ -21,8 +67,8 @@ class SettingsDialog(QDialog):
         self.resize(400, 200)
         
         self.parent_app = parent
-        config_path = os.path.join(ROOT, "input-box.config")
-        self.settings = QSettings(config_path, QSettings.Format.IniFormat)
+        # Load and validate settings at initialization
+        self.settings = load_and_validate_settings()
         
         layout = QVBoxLayout()
         self.enable_hotkey_cb = QCheckBox("Enable hotkey activation")
@@ -46,7 +92,6 @@ class SettingsDialog(QDialog):
         self.preserve_clipboard_cb.setChecked(self.settings.value("preserve_clipboard", True, bool))
         layout.addWidget(self.preserve_clipboard_cb)
         self.auto_paste_cb.toggled.connect(self.on_auto_paste_toggled)
-        self.on_auto_paste_toggled(self.auto_paste_cb.isChecked())
         self.enable_hotkey_cb.toggled.connect(self.on_enable_hotkey_toggled)
         self.on_enable_hotkey_toggled(self.enable_hotkey_cb.isChecked())
 
@@ -97,6 +142,75 @@ class SettingsDialog(QDialog):
         
         layout.addWidget(self.auto_startup_cb)
 
+        # Advanced Settings Section (at the bottom)
+        self.advanced_button = QPushButton("Advanced Settings")
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.clicked.connect(self.toggle_advanced_settings)
+        layout.addWidget(self.advanced_button)
+        
+        # Advanced settings frame (initially hidden)
+        self.advanced_frame = QFrame()
+        self.advanced_frame.setFrameStyle(QFrame.Shape.Box)
+        self.advanced_frame.setVisible(False)
+        
+        advanced_layout = QVBoxLayout()
+        
+        # Auto file link checkbox (depends on auto paste)
+        self.auto_file_link_cb = QCheckBox("Enable automatic file linking")
+        auto_file_link_enabled = self.settings.value("auto_file_link", False, bool)
+        auto_paste_enabled = self.settings.value("auto_paste", True, bool)
+        
+        # Only enable auto file linking if auto paste is also enabled
+        if auto_file_link_enabled and not auto_paste_enabled:
+            auto_file_link_enabled = False
+            self.settings.setValue("auto_file_link", False)
+        
+        self.auto_file_link_cb.setChecked(auto_file_link_enabled)
+        self.auto_file_link_cb.setEnabled(auto_paste_enabled)
+        self.auto_file_link_cb.toggled.connect(self.on_auto_file_link_toggled)
+        
+        if not auto_paste_enabled:
+            self.auto_file_link_cb.setToolTip("Auto file linking requires auto paste to be enabled")
+        
+        advanced_layout.addWidget(self.auto_file_link_cb)
+        
+        # Target directory selection
+        target_dir_layout = QHBoxLayout()
+        target_dir_layout.addWidget(QLabel("Target directory:"))
+        
+        self.target_dir_button = QPushButton()
+        default_target_dir = self.settings.value("target_directory", ROOT, str)
+        # Ensure target directory exists, fallback to ROOT if not
+        if not os.path.exists(default_target_dir):
+            default_target_dir = ROOT
+            self.settings.setValue("target_directory", default_target_dir)
+        
+        self.target_dir_button.setText(shorten_path(default_target_dir))
+        self.target_dir_button.clicked.connect(self.select_target_directory)
+        target_dir_layout.addWidget(self.target_dir_button)
+        advanced_layout.addLayout(target_dir_layout)
+        
+        # Use symlink checkbox
+        self.use_symlink_cb = QCheckBox("Use symbolic links instead of hard links")
+        self.use_symlink_cb.setChecked(self.settings.value("use_symlink", False, bool))
+        advanced_layout.addWidget(self.use_symlink_cb)
+        
+        # Clean up links button
+        cleanup_layout = QHBoxLayout()
+        cleanup_layout.addWidget(QLabel("Link Management:"))
+        self.cleanup_links_btn = QPushButton("Clean Up Created Links")
+        self.cleanup_links_btn.clicked.connect(self.cleanup_created_links)
+        cleanup_layout.addWidget(self.cleanup_links_btn)
+        advanced_layout.addLayout(cleanup_layout)
+        
+        self.advanced_frame.setLayout(advanced_layout)
+        layout.addWidget(self.advanced_frame)
+        
+        # Initialize the state of advanced controls
+        self.on_auto_file_link_toggled(self.auto_file_link_cb.isChecked())
+        # Initialize auto paste state after all UI elements are created
+        self.on_auto_paste_toggled(self.auto_paste_cb.isChecked())
+
         button_layout = QHBoxLayout()
         ok_btn = QPushButton("OK")
         cancel_btn = QPushButton("Cancel")
@@ -106,17 +220,75 @@ class SettingsDialog(QDialog):
         button_layout.addWidget(cancel_btn)
         layout.addLayout(button_layout)
         self.setLayout(layout)
+        
+        self._fix_dialog_width()
+    
+    def _fix_dialog_width(self):
+        """Calculate and fix the dialog width based on the expanded advanced settings."""
+        was_visible = self.advanced_frame.isVisible()
+        self.advanced_frame.setVisible(True)
+        layout = self.layout()
+        if layout:
+            layout.activate()
+        self.adjustSize()
+        max_width = self.width()
+        self.advanced_frame.setVisible(was_visible)
+        self.setFixedWidth(max_width)
+        if not was_visible:
+            self.adjustSize()
     
     def on_auto_paste_toggled(self, checked):
         self.preserve_clipboard_cb.setEnabled(checked)
         if not checked:
             self.preserve_clipboard_cb.setChecked(False)
+            self.auto_file_link_cb.setChecked(False)
+            self.auto_file_link_cb.setEnabled(False)
+            self.auto_file_link_cb.setToolTip("Auto file linking requires auto paste to be enabled")
         else:
             self.preserve_clipboard_cb.setChecked(True)
+            self.auto_file_link_cb.setEnabled(True)
+            self.auto_file_link_cb.setToolTip("")
+        
+        self.on_auto_file_link_toggled(self.auto_file_link_cb.isChecked())
     
     def on_enable_hotkey_toggled(self, checked):
         self.hotkey_edit.setEnabled(checked)
     
+    def toggle_advanced_settings(self):
+        """Toggle the visibility of advanced settings."""
+        is_visible = self.advanced_frame.isVisible()
+        self.advanced_frame.setVisible(not is_visible)
+        self.advanced_button.setText("Advanced Settings" if is_visible else "Hide Advanced Settings")
+        current_width = self.width()
+        self.adjustSize()
+        self.setFixedWidth(current_width)
+    
+    def on_auto_file_link_toggled(self, checked):
+        """Enable/disable target directory and symlink options based on auto file link setting."""
+        auto_paste_enabled = self.auto_paste_cb.isChecked()
+        controls_enabled = checked and auto_paste_enabled
+        
+        self.target_dir_button.setEnabled(controls_enabled)
+        self.use_symlink_cb.setEnabled(controls_enabled)
+        self.cleanup_links_btn.setEnabled(True)
+    
+    def select_target_directory(self):
+        """Open directory selection dialog for target directory."""
+        current_dir = expand_path(self.target_dir_button.text())
+        selected_dir = QFileDialog.getExistingDirectory(
+            self, 
+            "Select Target Directory", 
+            current_dir
+        )
+        if selected_dir:
+            self.target_dir_button.setText(shorten_path(selected_dir))
+    
+    def cleanup_created_links(self):
+        """Open the link cleanup dialog."""
+        from .input import InputDialog
+        temp_dialog = InputDialog()
+        temp_dialog.cleanup_created_links()
+
     def on_log_level_changed(self, level_name):
         """Handle log level change."""
         level = get_log_level_from_name(level_name)
@@ -373,12 +545,16 @@ WantedBy=graphical-session.target
             self.parent_app.restart_hotkey_temporarily()
     
     def accept(self):
-        # Save settings
-        self.settings.setValue("enable_hotkey", self.enable_hotkey_cb.isChecked())
-        self.settings.setValue("hotkey", self.hotkey_edit.keySequence().toString())
-        self.settings.setValue("auto_paste", self.auto_paste_cb.isChecked())
-        self.settings.setValue("preserve_clipboard", self.preserve_clipboard_cb.isChecked())
-        self.settings.setValue("log_level", self.log_level_combo.currentText())
+        settings_dict = {
+            "enable_hotkey": self.enable_hotkey_cb.isChecked(),
+            "hotkey": self.hotkey_edit.keySequence().toString(),
+            "auto_paste": self.auto_paste_cb.isChecked(),
+            "preserve_clipboard": self.preserve_clipboard_cb.isChecked(),
+            "log_level": self.log_level_combo.currentText(),
+            "auto_file_link": self.auto_file_link_cb.isChecked(),
+            "target_directory": expand_path(self.target_dir_button.text()),
+            "use_symlink": self.use_symlink_cb.isChecked()
+        }
         
         # Handle auto-startup setting change (only when running under service and service exists)
         if is_running_under_service():
@@ -395,7 +571,7 @@ WantedBy=graphical-session.target
                         else:
                             subprocess.run(['systemctl', '--user', 'disable', 'input-box.service'], check=True)
                             logger.info("Auto-startup disabled for input-box service")
-                        self.settings.setValue("auto_startup", new_setting)
+                        settings_dict["auto_startup"] = new_setting
                         
                     except subprocess.CalledProcessError as e:
                         logger.error(f"Failed to {'enable' if new_setting else 'disable'} auto-startup: {e}")
@@ -416,14 +592,16 @@ WantedBy=graphical-session.target
                         )
                         return
                 else:
-                    self.settings.setValue("auto_startup", new_setting)
+                    settings_dict["auto_startup"] = new_setting
             else:
                 # Service doesn't exist, just save the setting without system calls
                 logger.debug("Service does not exist, saving auto-startup setting without system calls")
-                self.settings.setValue("auto_startup", self.auto_startup_cb.isChecked())
+                settings_dict["auto_startup"] = self.auto_startup_cb.isChecked()
         else:
             # Not running under service, just save the setting
-            self.settings.setValue("auto_startup", self.auto_startup_cb.isChecked())
+            settings_dict["auto_startup"] = self.auto_startup_cb.isChecked()
+        
+        save_settings_to_file(settings_dict)
         
         logger.info("Settings saved successfully")
         super().accept()
@@ -441,7 +619,10 @@ WantedBy=graphical-session.target
             'auto_paste': self.auto_paste_cb.isChecked(),
             'preserve_clipboard': self.preserve_clipboard_cb.isChecked(),
             'log_level': self.log_level_combo.currentText(),
-            'auto_startup': self.auto_startup_cb.isChecked()
+            'auto_startup': self.auto_startup_cb.isChecked(),
+            'auto_file_link': self.auto_file_link_cb.isChecked(),
+            'target_directory': expand_path(self.target_dir_button.text()),
+            'use_symlink': self.use_symlink_cb.isChecked()
         }
         
         return settings

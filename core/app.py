@@ -8,7 +8,7 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings, QTimer
 from .hotkey_manager import create_hotkey_manager, HotkeyManager
 from .tools import *
-from .settings import SettingsDialog
+from .settings import SettingsDialog, load_and_validate_settings, save_settings_to_file
 from .input import InputDialog
 
 
@@ -27,16 +27,14 @@ class TrayInputApp(QApplication):
             except subprocess.CalledProcessError as e:
                 pass
         
-        config_path = os.path.join(ROOT, "input-box.config")
-        self.settings = QSettings(config_path, QSettings.Format.IniFormat)
-        
+        self.settings = load_and_validate_settings()
         saved_log_level = self.settings.value("log_level", "WARNING", str)
         level = get_log_level_from_name(saved_log_level)
         update_log_level(level)
         logger.info(f"Applied saved log level: {saved_log_level}")
         
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.create_icon())
+        self.tray_icon.setIcon(self.create_tray_icon())
         self.tray_icon.setToolTip("Quick Input Tool")
         
         menu = QMenu()
@@ -186,7 +184,20 @@ class TrayInputApp(QApplication):
         self.hotkey_thread = threading.Thread(target=run_hotkey_loop, daemon=True)
         self.hotkey_thread.start()
         
-    def create_icon(self):
+    def create_tray_icon(self):
+        """Create tray icon, preferring ROOT/icon.png, falling back to drawn blue circle."""
+        icon_path = os.path.join(ROOT, "icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    logger.debug(f"Using icon from {icon_path}")
+                    return icon
+                else:
+                    logger.warning(f"Icon file exists but failed to load: {icon_path}")
+            except Exception as e:
+                logger.warning(f"Error loading icon from {icon_path}: {e}")
+        logger.debug("Using fallback drawn tray icon")
         pixmap = QPixmap(16, 16)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
@@ -204,6 +215,24 @@ class TrayInputApp(QApplication):
     
     def quit_app(self):
         logger.info("Shutting down application")
+        
+        # Save settings on exit
+        try:
+            settings_dict = {
+                "enable_hotkey": self.settings.value("enable_hotkey", True, bool),
+                "hotkey": self.settings.value("hotkey", "Ctrl+Q", str),
+                "auto_paste": self.settings.value("auto_paste", True, bool),
+                "preserve_clipboard": self.settings.value("preserve_clipboard", True, bool),
+                "log_level": self.settings.value("log_level", "WARNING", str),
+                "auto_file_link": self.settings.value("auto_file_link", False, bool),
+                "target_directory": self.settings.value("target_directory", ROOT, str),
+                "use_symlink": self.settings.value("use_symlink", False, bool),
+                "auto_startup": self.settings.value("auto_startup", True, bool)
+            }
+            save_settings_to_file(settings_dict)
+        except Exception as e:
+            logger.error(f"Failed to save settings on exit: {e}")
+        
         if self.hotkey_loop and not self.hotkey_loop.is_closed():
             future = asyncio.run_coroutine_threadsafe(self.hotkey_manager.stop(), self.hotkey_loop)
             try:

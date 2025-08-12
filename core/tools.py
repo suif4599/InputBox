@@ -16,6 +16,22 @@ setup_logging(log_file_path, logging.WARNING)
 logger = get_logger(__name__)
 
 
+def shorten_path(path: str) -> str:
+    """Replace home directory in path with ~ for shorter display."""
+    if not path:
+        return path
+    
+    home_dir = os.path.expanduser("~")
+    if path.startswith(home_dir):
+        return path.replace(home_dir, "~", 1)
+    return path
+
+
+def expand_path(path: str) -> str:
+    """Expand ~ in path to full home directory path."""
+    return os.path.expanduser(path)
+
+
 def is_running_under_service() -> bool:
     """Check if the current process is running under systemd service."""
     try:
