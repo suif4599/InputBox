@@ -95,7 +95,7 @@ class TrayInputApp(QApplication):
     
     def show_help(self):
         # Show help dialog with content from help.md file
-        help_file_path = os.path.join(os.path.dirname(__file__), "help.md")
+        help_file_path = os.path.join(ROOT, "help.md")
         help_content = "Help file not found."
         
         try:
