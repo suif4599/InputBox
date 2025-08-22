@@ -1,10 +1,9 @@
 import os
 import threading
 import re
-import shutil
 from PyQt6.QtWidgets import QApplication, QTextEdit, QVBoxLayout, QWidget
 from PyQt6.QtGui import QKeyEvent, QIcon
-from PyQt6.QtCore import Qt, QEvent, QSettings, QMimeData, QUrl
+from PyQt6.QtCore import Qt, QEvent, QSettings, QMimeData, QUrl, QTimer
 from pynput import keyboard
 from pynput.keyboard import Key
 from .tools import *
@@ -35,7 +34,7 @@ class CustomTextEdit(QTextEdit):
 class InputDialog(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.set_window_icon()
         self.text_edit = CustomTextEdit(self)
@@ -47,6 +46,179 @@ class InputDialog(QWidget):
         self.text_edit.installEventFilter(self)
         config_path = os.path.join(ROOT, "input-box.config")
         self.settings = QSettings(config_path, QSettings.Format.IniFormat)
+        
+        self._saved_text = ""
+        self._saved_cursor_position = 0
+        self._saved_selection_start = 0
+        self._saved_selection_end = 0
+        self._should_select_all = False
+        self._last_dismissal_was_active = True  # Track if last dismissal was active (Esc) or passive (focus loss)
+    
+    def save_current_state(self, behavior="content_and_cursor"):
+        """Save current text and cursor position based on behavior setting.
+        
+        Args:
+            behavior: "content_and_cursor", "content_only", or "no_save"
+        """
+        if behavior == "no_save":
+            self._saved_text = ""
+            self._saved_cursor_position = 0
+            self._saved_selection_start = 0
+            self._saved_selection_end = 0
+            logger.debug("No state saved (no_save behavior)")
+        elif behavior == "content_only":
+            self._saved_text = self.text_edit.toPlainText()
+            self._saved_cursor_position = 0
+            self._saved_selection_start = 0
+            self._saved_selection_end = 0
+            logger.debug(f"Saved content only: {len(self._saved_text)} chars")
+        else:
+            self._saved_text = self.text_edit.toPlainText()
+            cursor = self.text_edit.textCursor()
+            self._saved_cursor_position = cursor.position()
+            if cursor.hasSelection():
+                self._saved_selection_start = cursor.selectionStart()
+                self._saved_selection_end = cursor.selectionEnd()
+                logger.debug(f"Saved content and cursor with selection: {len(self._saved_text)} chars, selection {self._saved_selection_start}-{self._saved_selection_end}")
+            else:
+                self._saved_selection_start = cursor.position()
+                self._saved_selection_end = cursor.position()
+                logger.debug(f"Saved content and cursor: {len(self._saved_text)} chars, cursor at {self._saved_cursor_position}")
+    
+    def restore_saved_state(self, save_mode):
+        """Restore previously saved text and cursor position based on save mode."""
+        if self._saved_text:
+            self.text_edit.setPlainText(self._saved_text)
+            if save_mode == "content_and_cursor":
+                cursor = self.text_edit.textCursor()
+                max_pos = len(self._saved_text)
+                selection_start = min(self._saved_selection_start, max_pos)
+                selection_end = min(self._saved_selection_end, max_pos)
+                
+                if selection_start != selection_end:
+                    cursor.setPosition(selection_start)
+                    cursor.setPosition(selection_end, cursor.MoveMode.KeepAnchor)
+                    self.text_edit.setTextCursor(cursor)
+                    logger.debug(f"Restored input state: {len(self._saved_text)} chars, selection {selection_start}-{selection_end}")
+                else:
+                    cursor_pos = min(self._saved_cursor_position, max_pos)
+                    cursor.setPosition(cursor_pos)
+                    self.text_edit.setTextCursor(cursor)
+                    logger.debug(f"Restored input state: {len(self._saved_text)} chars, cursor at {cursor_pos}")
+            elif save_mode == "content_only":
+                self._should_select_all = True
+                logger.debug(f"Restored input state: {len(self._saved_text)} chars, will select all")
+            else:
+                logger.critical("Restored input state: no valid save mode")
+
+    def clear_saved_state(self):
+        """Clear saved state (called when user presses Enter)."""
+        self._saved_text = ""
+        self._saved_cursor_position = 0
+        self._saved_selection_start = 0
+        self._saved_selection_end = 0
+        self._last_dismissal_was_active = True
+        logger.debug("Cleared saved input state")
+    
+    def get_dismissal_behavior(self, is_active=True):
+        """Get the appropriate dismissal behavior based on settings.
+        
+        Args:
+            is_active: True for active dismissal (Esc), False for passive dismissal (focus loss)
+            
+        Returns:
+            Behavior string: "content_and_cursor", "content_only", or "no_save"
+        """
+        if is_active:
+            return self.settings.value("active_dismissal_behavior", "content_and_cursor", str)
+        else:
+            passive_behavior = self.settings.value("passive_dismissal_behavior", "follow_active", str)
+            if passive_behavior == "follow_active":
+                return self.settings.value("active_dismissal_behavior", "content_and_cursor", str)
+            else:
+                return passive_behavior
+    
+    def hide_with_state_save(self, is_active=True):
+        """Hide the dialog and save current state based on settings.
+        
+        Args:
+            is_active: True for active dismissal (Esc), False for passive dismissal (focus loss)
+        """
+        behavior = self.get_dismissal_behavior(is_active)
+        self.save_current_state(behavior)
+        self._last_dismissal_was_active = is_active  # Record the dismissal type
+        self.hide()
+        dismissal_type = "active" if is_active else "passive"
+        logger.debug(f"Hidden with {dismissal_type} dismissal ({behavior} behavior)")
+    
+    def ensure_focus(self):
+        if self.isVisible():
+            if not self.isActiveWindow() or not self.text_edit.hasFocus():
+                saved_text = self.text_edit.toPlainText()
+                cursor = self.text_edit.textCursor()
+                saved_cursor_position = cursor.position()
+                saved_has_selection = cursor.hasSelection()
+                saved_selection_start = cursor.selectionStart() if saved_has_selection else cursor.position()
+                saved_selection_end = cursor.selectionEnd() if saved_has_selection else cursor.position()
+                saved_position = self.pos()
+                
+                self.hide()
+                self.show()
+                self.move(saved_position)
+                self.raise_()
+                self.activateWindow()
+                
+                self.text_edit.setPlainText(saved_text)
+                
+                if self._saved_text and saved_text == self._saved_text:
+                    restore_behavior = self.get_dismissal_behavior(self._last_dismissal_was_active)
+                    if restore_behavior == "content_only":
+                        QTimer.singleShot(10, self.text_edit.selectAll)
+                    elif restore_behavior == "content_and_cursor":
+                        cursor = self.text_edit.textCursor()
+                        max_pos = len(saved_text)
+                        selection_start = min(self._saved_selection_start, max_pos)
+                        selection_end = min(self._saved_selection_end, max_pos)
+                        
+                        if selection_start != selection_end:
+                            cursor.setPosition(selection_start)
+                            cursor.setPosition(selection_end, cursor.MoveMode.KeepAnchor)
+                        else:
+                            cursor_pos = min(self._saved_cursor_position, max_pos)
+                            cursor.setPosition(cursor_pos)
+                        self.text_edit.setTextCursor(cursor)
+                else:
+                    cursor = self.text_edit.textCursor()
+                    max_pos = len(saved_text)
+                    
+                    if saved_has_selection:
+                        start_pos = min(saved_selection_start, max_pos)
+                        end_pos = min(saved_selection_end, max_pos)
+                        cursor.setPosition(start_pos)
+                        cursor.setPosition(end_pos, cursor.MoveMode.KeepAnchor)
+                    else:
+                        cursor_pos = min(saved_cursor_position, max_pos)
+                        cursor.setPosition(cursor_pos)
+                    self.text_edit.setTextCursor(cursor)
+                    
+                self.text_edit.setFocus()
+        else:
+            if self._saved_text:
+                restore_behavior = self.get_dismissal_behavior(self._last_dismissal_was_active)
+                self.restore_saved_state(restore_behavior)
+            else:
+                self.text_edit.clear()
+                if self.text_edit.toPlainText():
+                    self.text_edit.selectAll()
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self.text_edit.setFocus()
+            
+            if self._saved_text:
+                restore_behavior = self.get_dismissal_behavior(self._last_dismissal_was_active)
+                if restore_behavior == "content_only":
+                    QTimer.singleShot(10, self.text_edit.selectAll)
     
     def clean_text(self, text: str) -> str:
         lines = text.splitlines()
@@ -448,6 +620,9 @@ class InputDialog(QWidget):
                     logger.debug("Text copied to clipboard")
                 
                 self.auto_paste(original_clipboard_data)
+        
+        # Clear saved state since user pressed Enter (successful completion)
+        self.clear_saved_state()
         self.hide()
     
     def auto_paste(self, original_clipboard_data=None):
@@ -507,7 +682,13 @@ class InputDialog(QWidget):
             screen_geometry = screen.geometry()
             self.move(screen_geometry.center() - self.rect().center())
         self.text_edit.setFocus()
-        self.text_edit.selectAll()
+        
+        # Check if we should select all text based on restoration mode
+        # This flag is set by restore_saved_state when content_only mode is used
+        if hasattr(self, '_should_select_all') and self._should_select_all:
+            self.text_edit.selectAll()
+            self._should_select_all = False  # Reset the flag
+        
         self.adjustSize()
         
     def eventFilter(self, a0, a1):
@@ -524,9 +705,27 @@ class InputDialog(QWidget):
                         self.execute_enter_logic()
                         return True
                 elif key_event.key() == Qt.Key.Key_Escape:
-                    self.hide()
+                    self.hide_with_state_save(is_active=True)  # Active dismissal (Esc key)
                     return True
         return super().eventFilter(a0, a1)
+    
+    def changeEvent(self, a0):
+        """Handle window state changes including activation/deactivation."""
+        super().changeEvent(a0)
+        if a0 and a0.type() == QEvent.Type.ActivationChange:
+            # Check if window lost activation (not active anymore)
+            if not self.isActiveWindow() and self.isVisible():
+                logger.debug("Window lost activation - auto-hiding")
+                # Use QTimer to delay slightly in case it's just a temporary focus change
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(50, self._check_and_hide_on_focus_loss)
+    
+    def _check_and_hide_on_focus_loss(self):
+        """Check if dialog should be hidden due to focus loss."""
+        # Only hide if the dialog is still visible and doesn't have focus
+        if self.isVisible() and not self.isActiveWindow() and not self.text_edit.hasFocus():
+            logger.debug("Auto-hiding due to focus loss")
+            self.hide_with_state_save(is_active=False)  # Passive dismissal (focus loss)
     
     def adjustSize(self):
         document = self.text_edit.document()

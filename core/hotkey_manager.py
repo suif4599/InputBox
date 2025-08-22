@@ -1,6 +1,7 @@
 """
 Global hotkey manager with pluggable backends.
 """
+import os
 import asyncio
 import threading
 import traceback
@@ -243,6 +244,8 @@ def get_available_managers() -> Dict[str, Type[HotkeyManager]]:
     
     # Check if keybinder is available
     try:
+        if os.environ.get("XDG_SESSION_TYPE", "").strip().lower() != 'x11':
+            raise RuntimeError("Not an X11 session")
         import gi
         gi.require_version('Keybinder', '3.0')
         from gi.repository import Keybinder # pyright: ignore[reportAttributeAccessIssue]
@@ -250,10 +253,46 @@ def get_available_managers() -> Dict[str, Type[HotkeyManager]]:
         logger.info("Keybinder is available")
     except ImportError:
         logger.info("Keybinder libraries not available")
+    except RuntimeError as re:
+        logger.info(f"Keybinder not available: {re}")
     except Exception as e:
         logger.info(f"Keybinder not available: {e}")
     
     return managers
+
+
+
+
+def get_auto_manager_name() -> str:
+    """Get the name of the manager that would be selected in auto mode.
+    
+    Returns:
+        Name of the auto-selected manager (e.g., 'pynput', 'x11')
+    """
+    available = get_available_managers()
+
+    if 'x11' in available:
+        return 'x11'
+    elif 'pynput' in available:
+        return 'pynput'
+    return 'unknown'
+
+
+def get_manager_display_name(manager_name: str) -> str:
+    """Get display name for a manager.
+    
+    Args:
+        manager_name: Internal manager name ('pynput', 'x11', etc.)
+        
+    Returns:
+        User-friendly display name
+    """
+    name_map = {
+        'pynput': 'Pynput',
+        'x11': 'X11 Keybinder',
+        'unknown': 'Unknown'
+    }
+    return name_map.get(manager_name, manager_name.title())
 
 
 def create_hotkey_manager(preferred: str = 'auto') -> HotkeyManager:
@@ -268,19 +307,10 @@ def create_hotkey_manager(preferred: str = 'auto') -> HotkeyManager:
     available = get_available_managers()
     
     if preferred == 'auto':
-        # Prefer X11 (keybinder) over pynput for better performance
-        if 'x11' in available:
-            logger.info("Using X11 (keybinder) hotkey manager")
-            return available['x11']()
-        elif 'pynput' in available:
-            logger.info("Using pynput hotkey manager")
-            return available['pynput']()
-        else:
-            raise RuntimeError("No hotkey managers available")
-    
-    elif preferred in available:
+        preferred = get_auto_manager_name()
+
+    if preferred in available:
         logger.info(f"Using {preferred} hotkey manager")
         return available[preferred]()
-    
     else:
         raise ValueError(f"Hotkey manager '{preferred}' not available. Available: {list(available.keys())}")

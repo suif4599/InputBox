@@ -49,7 +49,8 @@ class TrayInputApp(QApplication):
         self.show_input_signal.connect(self.show_input)
         
         logger.info("Creating hotkey manager")
-        self.hotkey_manager: HotkeyManager = create_hotkey_manager('auto')
+        preferred_manager = self.settings.value("hotkey_manager", "auto", str)
+        self.hotkey_manager: HotkeyManager = create_hotkey_manager(preferred_manager)
         self.hotkey_loop = None
         self.hotkey_thread = None
         
@@ -67,6 +68,14 @@ class TrayInputApp(QApplication):
         logger.info("Opening settings dialog")
         dialog = SettingsDialog(self)
         dialog.parent_app = self
+        icon_path = os.path.join(ROOT, "icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    dialog.setWindowIcon(icon)
+            except Exception:
+                pass
         if dialog.exec() == QDialog.DialogCode.Accepted:
             logger.info("Settings accepted, restarting hotkey")
             self.stop_hotkey_temporarily()
@@ -97,19 +106,24 @@ class TrayInputApp(QApplication):
         # Show help dialog with content from help.md file
         help_file_path = os.path.join(ROOT, "help.md")
         help_content = "Help file not found."
-        
         try:
             if os.path.exists(help_file_path):
                 with open(help_file_path, 'r', encoding='utf-8') as f:
                     help_content = f.read()
         except Exception as e:
             help_content = f"Error reading help file: {e}"
-        
         help_dialog = QDialog()
         help_dialog.setWindowTitle("Help")
         help_dialog.setModal(True)
         help_dialog.resize(600, 400)
-        
+        icon_path = os.path.join(ROOT, "icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    help_dialog.setWindowIcon(icon)
+            except Exception:
+                pass
         layout = QVBoxLayout()
         text_browser = QTextBrowser()
         text_browser.setMarkdown(help_content)
@@ -131,7 +145,8 @@ class TrayInputApp(QApplication):
         
         if self.hotkey_thread and self.hotkey_thread.is_alive():
             self.hotkey_thread.join(timeout=2.0)
-        self.hotkey_manager = create_hotkey_manager('auto')
+        preferred_manager = self.settings.value("hotkey_manager", "auto", str)
+        self.hotkey_manager = create_hotkey_manager(preferred_manager)
     
     def restart_hotkey_temporarily(self):
         """Restart hotkey (called after settings editing)."""
@@ -208,10 +223,7 @@ class TrayInputApp(QApplication):
     
     def show_input(self):
         logger.debug("Showing input dialog")
-        self.input_dialog.text_edit.clear()
-        self.input_dialog.show()
-        self.input_dialog.raise_()
-        self.input_dialog.activateWindow()
+        self.input_dialog.ensure_focus()
     
     def quit_app(self):
         logger.info("Shutting down application")
@@ -221,13 +233,16 @@ class TrayInputApp(QApplication):
             settings_dict = {
                 "enable_hotkey": self.settings.value("enable_hotkey", True, bool),
                 "hotkey": self.settings.value("hotkey", "Ctrl+Q", str),
+                "hotkey_manager": self.settings.value("hotkey_manager", "auto", str),
                 "auto_paste": self.settings.value("auto_paste", True, bool),
                 "preserve_clipboard": self.settings.value("preserve_clipboard", True, bool),
                 "log_level": self.settings.value("log_level", "WARNING", str),
                 "auto_file_link": self.settings.value("auto_file_link", False, bool),
                 "target_directory": self.settings.value("target_directory", ROOT, str),
                 "use_symlink": self.settings.value("use_symlink", False, bool),
-                "auto_startup": self.settings.value("auto_startup", True, bool)
+                "auto_startup": self.settings.value("auto_startup", True, bool),
+                "active_dismissal_behavior": self.settings.value("active_dismissal_behavior", "content_and_cursor", str),
+                "passive_dismissal_behavior": self.settings.value("passive_dismissal_behavior", "follow_active", str)
             }
             save_settings_to_file(settings_dict)
         except Exception as e:

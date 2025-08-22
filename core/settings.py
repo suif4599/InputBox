@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .app import TrayInputApp
 
 from .tools import *
+from .hotkey_manager import get_available_managers, get_auto_manager_name, get_manager_display_name
 
 
 def load_and_validate_settings():
@@ -74,6 +75,34 @@ class SettingsDialog(QDialog):
         self.enable_hotkey_cb = QCheckBox("Enable hotkey activation")
         self.enable_hotkey_cb.setChecked(self.settings.value("enable_hotkey", True, bool))
         layout.addWidget(self.enable_hotkey_cb)
+        
+        # Hotkey manager selection
+        hotkey_manager_layout = QHBoxLayout()
+        hotkey_manager_layout.addWidget(QLabel("Hotkey Manager:"))
+        self.hotkey_manager_combo = QComboBox()
+        
+        # Get available managers and populate combo box
+        available_managers = get_available_managers()
+        auto_manager = get_auto_manager_name()
+        auto_display_name = get_manager_display_name(auto_manager)
+        
+        # Add auto option with current manager info
+        self.hotkey_manager_combo.addItem(f"Auto ({auto_display_name})", "auto")
+        
+        # Add individual managers
+        for manager_key in available_managers.keys():
+            display_name = get_manager_display_name(manager_key)
+            self.hotkey_manager_combo.addItem(display_name, manager_key)
+        
+        # Set current selection
+        current_manager = self.settings.value("hotkey_manager", "auto", str)
+        current_index = self.hotkey_manager_combo.findData(current_manager)
+        if current_index >= 0:
+            self.hotkey_manager_combo.setCurrentIndex(current_index)
+        
+        hotkey_manager_layout.addWidget(self.hotkey_manager_combo)
+        layout.addLayout(hotkey_manager_layout)
+        
         hotkey_layout = QHBoxLayout()
         hotkey_layout.addWidget(QLabel("Hotkey:"))
         self.hotkey_edit = QKeySequenceEdit()
@@ -203,6 +232,44 @@ class SettingsDialog(QDialog):
         cleanup_layout.addWidget(self.cleanup_links_btn)
         advanced_layout.addLayout(cleanup_layout)
         
+        # Input preservation settings
+        preservation_label = QLabel("Input Preservation Settings:")
+        preservation_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        advanced_layout.addWidget(preservation_label)
+        
+        # Active dismissal (Esc key) preservation
+        active_dismissal_layout = QHBoxLayout()
+        active_dismissal_layout.addWidget(QLabel("When pressing Esc:"))
+        self.active_dismissal_combo = QComboBox()
+        self.active_dismissal_combo.addItem("Save content and cursor position", "content_and_cursor")
+        self.active_dismissal_combo.addItem("Save content only", "content_only")
+        self.active_dismissal_combo.addItem("Don't save anything", "no_save")
+        
+        current_active_setting = self.settings.value("active_dismissal_behavior", "content_and_cursor", str)
+        active_index = self.active_dismissal_combo.findData(current_active_setting)
+        if active_index >= 0:
+            self.active_dismissal_combo.setCurrentIndex(active_index)
+        
+        active_dismissal_layout.addWidget(self.active_dismissal_combo)
+        advanced_layout.addLayout(active_dismissal_layout)
+        
+        # Passive dismissal (focus loss) preservation
+        passive_dismissal_layout = QHBoxLayout()
+        passive_dismissal_layout.addWidget(QLabel("When losing focus:"))
+        self.passive_dismissal_combo = QComboBox()
+        self.passive_dismissal_combo.addItem("Follow Esc behavior", "follow_active")
+        self.passive_dismissal_combo.addItem("Save content and cursor position", "content_and_cursor")
+        self.passive_dismissal_combo.addItem("Save content only", "content_only")
+        self.passive_dismissal_combo.addItem("Don't save anything", "no_save")
+        
+        current_passive_setting = self.settings.value("passive_dismissal_behavior", "follow_active", str)
+        passive_index = self.passive_dismissal_combo.findData(current_passive_setting)
+        if passive_index >= 0:
+            self.passive_dismissal_combo.setCurrentIndex(passive_index)
+        
+        passive_dismissal_layout.addWidget(self.passive_dismissal_combo)
+        advanced_layout.addLayout(passive_dismissal_layout)
+        
         self.advanced_frame.setLayout(advanced_layout)
         layout.addWidget(self.advanced_frame)
         
@@ -253,6 +320,7 @@ class SettingsDialog(QDialog):
     
     def on_enable_hotkey_toggled(self, checked):
         self.hotkey_edit.setEnabled(checked)
+        self.hotkey_manager_combo.setEnabled(checked)
     
     def toggle_advanced_settings(self):
         """Toggle the visibility of advanced settings."""
@@ -363,6 +431,8 @@ class SettingsDialog(QDialog):
                 exec_command = f"{conda_exe} run -n {conda_env} python {main_py_path}"
 
             display = os.environ.get("DISPLAY", ":0")
+            session_type = os.environ.get("XDG_SESSION_TYPE", "x11")
+            wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
 
             service_content = f"""[Unit]
 Description=Input Box - Quick Input Tool
@@ -375,7 +445,8 @@ Type=simple
 Environment="DISPLAY={display}"
 Environment="XDG_RUNTIME_DIR=/run/user/{user_id}"
 Environment="HOME={os.path.expanduser('~')}"
-Environment="XDG_SESSION_TYPE=x11"
+Environment="XDG_SESSION_TYPE={session_type}"
+Environment="WAYLAND_DISPLAY={wayland_display}"
 Environment="PATH={os.environ.get('PATH', '')}"
 ExecStart={exec_command}
 Restart=on-failure
@@ -548,12 +619,15 @@ WantedBy=graphical-session.target
         settings_dict = {
             "enable_hotkey": self.enable_hotkey_cb.isChecked(),
             "hotkey": self.hotkey_edit.keySequence().toString(),
+            "hotkey_manager": self.hotkey_manager_combo.currentData(),
             "auto_paste": self.auto_paste_cb.isChecked(),
             "preserve_clipboard": self.preserve_clipboard_cb.isChecked(),
             "log_level": self.log_level_combo.currentText(),
             "auto_file_link": self.auto_file_link_cb.isChecked(),
             "target_directory": expand_path(self.target_dir_button.text()),
-            "use_symlink": self.use_symlink_cb.isChecked()
+            "use_symlink": self.use_symlink_cb.isChecked(),
+            "active_dismissal_behavior": self.active_dismissal_combo.currentData(),
+            "passive_dismissal_behavior": self.passive_dismissal_combo.currentData()
         }
         
         # Handle auto-startup setting change (only when running under service and service exists)
@@ -616,13 +690,16 @@ WantedBy=graphical-session.target
         settings = {
             'enable_hotkey': self.enable_hotkey_cb.isChecked(),
             'hotkey': self.hotkey_edit.keySequence().toString(),
+            'hotkey_manager': self.hotkey_manager_combo.currentData(),
             'auto_paste': self.auto_paste_cb.isChecked(),
             'preserve_clipboard': self.preserve_clipboard_cb.isChecked(),
             'log_level': self.log_level_combo.currentText(),
             'auto_startup': self.auto_startup_cb.isChecked(),
             'auto_file_link': self.auto_file_link_cb.isChecked(),
             'target_directory': expand_path(self.target_dir_button.text()),
-            'use_symlink': self.use_symlink_cb.isChecked()
+            'use_symlink': self.use_symlink_cb.isChecked(),
+            'active_dismissal_behavior': self.active_dismissal_combo.currentData(),
+            'passive_dismissal_behavior': self.passive_dismissal_combo.currentData()
         }
         
         return settings

@@ -18,19 +18,19 @@ InputBox is a system tray application that provides an emergency input workaroun
 - Automatic text copying to clipboard
 - Optional auto-paste functionality
 
-### 📁 Sandbox File Access
+### Sandbox File Access
 - Automatic file path detection and linking
 - Create hard links or symbolic links for sandboxed applications
 - Enables file access for applications with restricted filesystem access
 - Link management and cleanup tools
 
-### ⚙️ System Integration
+### System Integration
 - Systemd user service support
 - Auto-startup on boot
 - System tray integration
 - Cross-session persistence
 
-### 🎨 User Experience
+### User Experience
 - Dark/light theme adaptation
 - Customizable hotkeys
 - Advanced settings panel
@@ -40,135 +40,98 @@ InputBox is a system tray application that provides an emergency input workaroun
 
 ### Prerequisites
 
-Make sure you have the following system packages installed:
-```bash
-# For hotkey functionality (Ubuntu/Debian)
-sudo apt install gir1.2-keybinder-3.0 libkeybinder-3.0-0
+# InputBox
 
-# For other distributions, install equivalent keybinder packages
+Quick Input Tool — a compact system-tray utility that provides an emergency input window and helps sandboxed applications access files by creating links in a whitelisted directory.
+
+![InputBox Demo](./icon.png)
+
+## Summary
+
+InputBox started as a small fallback input helper. Since then it gained a number of practical features:
+
+- Global hotkey activation (default: `Ctrl+Q`, configurable)
+- Lightweight frameless input dialog with multi-line support
+- Automatic copy-to-clipboard and optional auto-paste (with optional clipboard preservation)
+- Automatic file detection and "file linking" (create hardlinks or symlinks into a target, whitelisted directory)
+- Link management UI (list and safely delete created links)
+- Settings dialog with advanced options (hotkey backend selection, auto-linking, input preservation behavior)
+- Pluggable hotkey backends (X11 keybinder when available, fallback to pynput)
+- Optional systemd user service registration (auto-detects conda environment and writes a unit file)
+- Robust logging with rotatable log file
+
+## Main features (details)
+
+- Activation: global hotkey to open the input dialog. Hotkey can be customized in Settings. Multiple hotkey backends are supported and selected automatically when possible.
+- Input dialog: frameless, adapts to dark/light themes, supports Enter to submit, Shift+Enter/Ctrl+Enter for newlines, Esc to cancel. Input preservation modes control whether content and cursor are saved when the dialog is dismissed.
+- Clipboard handling: submitted text is copied to the clipboard. If text is a file path, InputBox can write proper file mime data so target apps receive file metadata.
+- Auto-paste: optionally simulates Ctrl+V after copying. Optionally preserves previous clipboard contents and restores them after paste.
+- File linking (sandbox support): when enabled, InputBox detects file paths pasted into the dialog (or present in the clipboard), creates a hard link or symlink into a configured target directory, and replaces the clipboard content with a file-type mime so sandboxed apps can access the linked file in the whitelisted location.
+- Link management: built-in UI to view created links and remove them safely (the app warns before deleting the last hard link to avoid data loss).
+- Settings & systemd: settings persist in `input-box.config` (INI). The Settings dialog helps register a `~/.config/systemd/user/input-box.service` unit — the implementation attempts to detect conda environments and craft an ExecStart that preserves the environment.
+
+## Installation
+
+Prerequisites (examples for Debian/Ubuntu):
+
+```bash
+# keybinder packages are recommended for best hotkey support
+sudo apt install gir1.2-keybinder-3.0 libkeybinder-3.0-0
 ```
 
-### Python Dependencies
+Install Python requirements:
 
-1. Clone or download the repository
-2. Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-Required packages:
-- PyQt6 (6.9.1+)
-- pynput (1.8.1+)
-- pygobject (3.50.1-)
-- psutil (7.0.0+)
+Requirements in this repo (example versions in `requirements.txt`):
+- PyQt6
+- pynput
+- pygobject (for Keybinder integration)
+- psutil
 
-### Running
+Run the app:
 
 ```bash
 cd input-box-code
 python main.py
 ```
 
-- Open system tray and click `Settings`
-- Click `Register Service`
-
 ## Usage
 
-### Basic Operation
+1. Run `python main.py` (or register as a systemd user service via Settings).
+2. Press the global hotkey (default `Ctrl+Q`) or select "Show Input" from the tray menu.
+3. Type or paste text. For file paths you can paste file icons/URLs — InputBox will detect and optionally create a link in the target directory.
+4. Press `Enter` to copy the content (or file mime data) to the clipboard and optionally auto-paste into the focused application.
 
-1. **Start the application**: Run `python main.py`
-2. **Activate input**: Press `Ctrl+Q` (or your configured hotkey)
-3. **Type your text**: Use the input window that appears
-4. **Submit**: Press `Enter` to copy text and close window
-5. **Multi-line**: Use `Shift+Enter` or `Ctrl+Enter` for new lines
-6. **Cancel**: Press `Esc` to close without copying
+Keyboard shortcuts inside the dialog:
 
-### File Handling for Sandboxed Applications
+- Enter: submit (copy to clipboard and close)
+- Shift+Enter / Ctrl+Enter: insert a newline
+- Esc: cancel (behavior on cancel is configurable)
 
-InputBox provides crucial file access capabilities for sandboxed applications:
+## File linking / sandbox workflow (short)
 
-- **Sandbox File Access**: Sandboxed applications (firejail, Flatpak, etc.) often can't access files from arbitrary locations
-- **Link Creation**: Creates hard links or symbolic links in a designated target directory
-- **Whitelist Solution**: Allows you to whitelist the target directory for sandbox access
-- **Auto-linking**: Automatically detects file paths and creates accessible links
-- **File metadata**: Preserves file information when copying to clipboard
-- **Link cleanup**: Safely manage and remove created links
+1. Enable "Auto paste" and "Automatic file linking" in Settings (Advanced).
+2. Configure the "Target directory" — a directory you can add to the sandbox/whitelist (e.g., a folder your Flatpak or firejail profile allows).
+3. Paste or type a file path (or paste a file from a file manager). InputBox will create a hardlink or symlink there and replace the clipboard with a file mime pointing to the linked file.
+4. The sandboxed application can then open the linked file from the whitelisted location.
 
-**Why this matters**: When a sandboxed application needs to access a file at `/home/user/documents/file.pdf`, it may be blocked. InputBox can create a link at `/home/user/sandbox-files/file.pdf` (your designated target directory), which you can then whitelist for sandbox access.
+Notes: the app tries to avoid overwriting existing files, appends suffixes when necessary, records created links in the config, and provides a cleanup dialog to remove created links safely.
 
-### System Service
+## Configuration files
 
-For persistent operation, register InputBox as a systemd user service:
-
-1. Open **Settings** from the tray menu
-2. Click **Register Service**
-3. The application will automatically:
-   - Detect your conda environment
-   - Create a systemd user service
-   - Enable auto-startup on boot
-
-## Configuration
-
-Access settings through the system tray menu:
-
-### Basic Settings
-- **Enable Hotkey**: Toggle global activation
-- **Hotkey**: Customize activation key combination
-- **Auto Paste**: Automatically paste after copying
-- **Preserve Clipboard**: Restore original clipboard content
-- **Log Level**: Control logging verbosity
-
-### Advanced Settings
-- **Auto File Linking**: Enable automatic file link creation
-- **Target Directory**: Set where file links are created
-- **Use Symbolic Links**: Choose between hard links and symlinks
-- **Link Management**: Clean up previously created links
-
-## Configuration Files
-
-- **Settings**: `input-box.config` (INI format)
-- **Logs**: `input-box.log` (configurable log level)
-- **Service**: `~/.config/systemd/user/input-box.service`
+- `input-box.config` — persistent settings (INI via QSettings)
+- `input-box.log` — rotating log file
+- Systemd user service: `~/.config/systemd/user/input-box.service` if registered
 
 ## Troubleshooting
 
-### Common Issues
-
-**Hotkey not working**
-- Ensure keybinder packages are installed
-- Check for hotkey conflicts with other applications
-- Try a different key combination in settings
-
-**Service registration fails**
-- Make sure you're running from a conda environment
-- Check conda environment variables are set
-- Verify systemd user service support
-
-**File linking not working**
-- Enable "Auto Paste" in settings (required for auto file linking)
-- Check target directory permissions
-- Ensure source files exist and are accessible
-
-**Application not starting**
-- Check system tray is available
-- Verify all dependencies are installed
-- Check log file for error details
-
-### Log Files
-
-Check `input-box.log` for detailed error information. Adjust log level in settings for more verbose output.
-
-## Requirements
-
-- **OS**: Linux with X11 (XGrab) or others (pynput)
-- **Python**: 3.10+
+- Hotkey not working: ensure keybinder libraries are installed (for X11) or allow the fallback pynput backend. Try another hotkey if conflict exists.
+- Service registration fails: the settings dialog tries to detect conda; make sure your environment variables (CONDA_DEFAULT_ENV / CONDA_EXE) are available or run the app from the intended environment.
+- File linking problems: verify the configured target directory exists and is writable; ensure the sandbox configuration actually whitelists that target directory.
 
 ## License
 
-This project is licensed under the GPLv3 License - see the [LICENSE](./LICENSE) file for details.
-
-## Disclaimer
-
-- This tool is designed as an **emergency fallback solution only**. 
-
-- The file linking feature exists specifically to help sandboxed applications access files by creating links in whitelisted directories - it's not intended as a general file management tool.
+This project is licensed under GPLv3 — see the included `LICENSE` file.
