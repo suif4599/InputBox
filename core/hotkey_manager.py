@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 class HotkeyManager(ABC):
     def __init__(self):
-        self.callback: Optional[Callable] = None
+        self.callback: Callable | None = None
         self.is_active = False
         
     @abstractmethod
@@ -236,9 +236,9 @@ class X11HotkeyManager(HotkeyManager):
             logger.info("Stopped keybinder hotkey listener")
 
 
-def get_available_managers() -> Dict[str, Type[HotkeyManager]]:
+def get_available_managers() -> dict[str, type[HotkeyManager]]:
     """Get dictionary of available hotkey managers."""
-    managers: Dict[str, Type[HotkeyManager]] = {
+    managers: dict[str, type[HotkeyManager]] = {
         'pynput': PynputHotkeyManager,
     }
     

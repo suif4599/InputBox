@@ -11,6 +11,12 @@ from .tools import *
 from .settings import SettingsDialog, load_and_validate_settings, save_settings_to_file
 from .input import InputDialog
 
+# Import plugin system
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from interface import CallbackPosition, CallbackContext
+from plugins import init_plugin_manager, get_plugin_manager
+
 
 
 class TrayInputApp(QApplication):
@@ -27,6 +33,17 @@ class TrayInputApp(QApplication):
             except subprocess.CalledProcessError as e:
                 pass
         
+        # Initialize plugin system
+        plugins_dir = os.path.join(ROOT, "plugins")
+        self.plugin_manager = init_plugin_manager(plugins_dir, logger)
+        self.plugin_manager.load_plugins()
+        
+        # Create callback context for plugin initialization
+        context = CallbackContext(app=self, logger=logger)
+        
+        # Trigger launch callbacks
+        self.plugin_manager.trigger_callbacks(CallbackPosition.ON_LAUNCH, context)
+        
         self.settings = load_and_validate_settings()
         saved_log_level = self.settings.value("log_level", "WARNING", str)
         level = get_log_level_from_name(saved_log_level)
@@ -40,12 +57,13 @@ class TrayInputApp(QApplication):
         menu = QMenu()
         menu.addAction("Show Input", self.show_input)
         menu.addAction("Settings", self.show_settings)
+        menu.addAction("Plugins", self.show_plugin_manager)
         menu.addAction("Help", self.show_help)
         menu.addSeparator()
         menu.addAction("Quit", self.quit_app)
 
         self.tray_icon.setContextMenu(menu)
-        self.input_dialog = InputDialog()
+        self.input_dialog = InputDialog(self)  # Pass app reference
         self.show_input_signal.connect(self.show_input)
         
         logger.info("Creating hotkey manager")
@@ -62,10 +80,18 @@ class TrayInputApp(QApplication):
         self.timer.timeout.connect(lambda: None)
         self.timer.start(200)
         
+        # Initialize plugins after everything is set up
+        self.plugin_manager.initialize_plugins(context)
+        
         logger.info("TrayInputApp initialization completed")
     
     def show_settings(self):
         logger.info("Opening settings dialog")
+        
+        # Trigger settings show callback
+        context = CallbackContext(app=self, logger=logger)
+        self.plugin_manager.trigger_callbacks(CallbackPosition.ON_SETTINGS_SHOW, context)
+        
         dialog = SettingsDialog(self)
         dialog.parent_app = self
         icon_path = os.path.join(ROOT, "icon.png")
@@ -84,6 +110,29 @@ class TrayInputApp(QApplication):
             self.setup_global_hotkey()
         else:
             logger.info("Settings dialog cancelled")
+            
+        # Trigger settings hide callback
+        self.plugin_manager.trigger_callbacks(CallbackPosition.ON_SETTINGS_HIDE, context)
+    
+    def show_plugin_manager(self):
+        """Show the plugin manager dialog."""
+        logger.info("Opening plugin manager dialog")
+        
+        from .plugin_manager_dialog import PluginManagerDialog
+        dialog = PluginManagerDialog(self)
+        
+        # Set icon
+        icon_path = os.path.join(ROOT, "icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    dialog.setWindowIcon(icon)
+            except Exception:
+                pass
+        
+        dialog.exec()
+        logger.info("Plugin manager dialog closed")
     
     def _run_async_in_thread(self, coro_func, *args):
         """Run an async function in a dedicated thread with its own event loop."""
@@ -176,6 +225,10 @@ class TrayInputApp(QApplication):
                     hotkey_sequence = self.settings.value("hotkey", "Ctrl+Q", str)
                     
                     def on_hotkey():
+                        # Trigger hotkey callback
+                        context = CallbackContext(app=self, logger=logger)
+                        self.plugin_manager.trigger_callbacks(CallbackPosition.ON_HOTKEY_TRIGGERED, context)
+                        
                         self.show_input_signal.emit()
                     
                     success = await self.hotkey_manager.register_hotkey(hotkey_sequence, on_hotkey)
@@ -223,12 +276,22 @@ class TrayInputApp(QApplication):
     
     def show_input(self):
         logger.debug("Showing input dialog")
+        
+        # Trigger input box show callback
+        context = CallbackContext(app=self, logger=logger)
+        self.plugin_manager.trigger_callbacks(CallbackPosition.ON_INPUT_BOX_SHOW, context)
+        
         self.input_dialog.ensure_focus()
     
     def quit_app(self):
         logger.info("Shutting down application")
         
-        # Save settings on exit
+        # Trigger exit callbacks
+        context = CallbackContext(app=self, logger=logger)
+        self.plugin_manager.trigger_callbacks(CallbackPosition.ON_EXIT, context)
+        
+        if hasattr(self.input_dialog, '_cached_root_password'):
+            self.input_dialog._cached_root_password = None
         try:
             settings_dict = {
                 "enable_hotkey": self.settings.value("enable_hotkey", True, bool),
@@ -257,6 +320,9 @@ class TrayInputApp(QApplication):
         
         if self.hotkey_thread and self.hotkey_thread.is_alive():
             self.hotkey_thread.join(timeout=2.0)
+        
+        # Shutdown plugins
+        self.plugin_manager.shutdown_plugins(context)
         
         if self.tray_icon:
             self.tray_icon.hide()

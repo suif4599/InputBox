@@ -1,12 +1,16 @@
 import os
 import threading
 import re
-from PyQt6.QtWidgets import QApplication, QTextEdit, QVBoxLayout, QWidget
+import subprocess
+from PyQt6.QtWidgets import QApplication, QTextEdit, QVBoxLayout, QWidget, QInputDialog, QLineEdit
 from PyQt6.QtGui import QKeyEvent, QIcon
 from PyQt6.QtCore import Qt, QEvent, QSettings, QMimeData, QUrl, QTimer
 from pynput import keyboard
 from pynput.keyboard import Key
 from .tools import *
+
+from interface import CallbackPosition, CallbackContext
+from plugins import get_plugin_manager
 
 
 class CustomTextEdit(QTextEdit):
@@ -14,26 +18,81 @@ class CustomTextEdit(QTextEdit):
         super().__init__(None)
         self._input_dialog = parent
         self.setAcceptRichText(False)
+        
+        self.textChanged.connect(self._on_text_changed)
+    
+    def _on_text_changed(self):
+        """Handle text changed event."""
+        if (self._input_dialog and 
+            hasattr(self._input_dialog, 'app') and 
+            self._input_dialog.app):
+            plugin_manager = get_plugin_manager()
+            if plugin_manager:
+                context = CallbackContext(
+                    app=self._input_dialog.app, 
+                    logger=logger,
+                    data={'text': self.toPlainText()}
+                )
+                plugin_manager.trigger_callbacks(CallbackPosition.ON_TEXT_CHANGED, context)
     
     def insertFromMimeData(self, source):
         """Override to handle file paste detection and force plain text."""
+        logger.debug("insertFromMimeData called")
         if not source:
+            logger.debug("No mime data source provided")
             return
+        
+        logger.debug(f"Mime data formats: {source.formats()}")
+        for format_name in source.formats():
+            if format_name in ['x-special/gnome-copied-files', 'text/uri-list', 'text/plain']:
+                try:
+                    data = source.data(format_name)
+                    if data:
+                        content = data.data().decode('utf-8', errors='ignore')
+                        logger.debug(f"Content of {format_name}: {content}")
+                except Exception as e:
+                    logger.debug(f"Could not decode {format_name}: {e}")
+        
+        if source.hasUrls():
+            urls = source.urls()
+            logger.debug(f"Number of URLs: {len(urls)}")
+            for i, url in enumerate(urls):
+                logger.debug(f"URL {i}: {url.toString()}, is local file: {url.isLocalFile()}")
+                if url.isLocalFile():
+                    logger.debug(f"Local file path: {url.toLocalFile()}")
+        
+        if source.hasText():
+            text = source.text()
+            logger.debug(f"Text content (first 100 chars): {text[:100]}")
+            
+        # Trigger paste callback
+        if self._input_dialog and hasattr(self._input_dialog, 'app') and self._input_dialog.app:
+            plugin_manager = get_plugin_manager()
+            if plugin_manager:
+                context = CallbackContext(
+                    app=self._input_dialog.app, 
+                    logger=logger,
+                    data={'mime_data': source}
+                )
+                plugin_manager.trigger_callbacks(CallbackPosition.ON_PASTE_IN_BOX, context)
             
         if self._input_dialog and self._input_dialog.handle_file_paste(source):
             # File was processed, don't insert the original content
+            logger.debug("File paste was handled by input dialog")
             return
         
         # For non-file content, only insert plain text
         if source.hasText():
             plain_text = source.text()
+            logger.debug(f"Inserting plain text: {plain_text[:50]}...")
             self.insertPlainText(plain_text)
         # Not calling super() to avoid inserting rich content
 
 
 class InputDialog(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, app=None):
+        super().__init__(None)
+        self.app = app  # Store app reference
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.set_window_icon()
@@ -53,6 +112,7 @@ class InputDialog(QWidget):
         self._saved_selection_end = 0
         self._should_select_all = False
         self._last_dismissal_was_active = True  # Track if last dismissal was active (Esc) or passive (focus loss)
+        self._cached_root_password = None  # Cache root password in memory only
     
     def save_current_state(self, behavior="content_and_cursor"):
         """Save current text and cursor position based on behavior setting.
@@ -147,6 +207,22 @@ class InputDialog(QWidget):
         behavior = self.get_dismissal_behavior(is_active)
         self.save_current_state(behavior)
         self._last_dismissal_was_active = is_active  # Record the dismissal type
+        
+        # Trigger input box hide callback
+        if self.app:
+            plugin_manager = get_plugin_manager()
+            if plugin_manager:
+                context = CallbackContext(
+                    app=self.app, 
+                    logger=logger,
+                    data={
+                        'text': self.text_edit.toPlainText(),
+                        'is_active_dismissal': is_active,
+                        'behavior': behavior
+                    }
+                )
+                plugin_manager.trigger_callbacks(CallbackPosition.ON_INPUT_BOX_HIDE, context)
+        
         self.hide()
         dismissal_type = "active" if is_active else "passive"
         logger.debug(f"Hidden with {dismissal_type} dismissal ({behavior} behavior)")
@@ -244,6 +320,119 @@ class InputDialog(QWidget):
                 pass
         return None
     
+    def check_link_creation_success(self, source_file, target_path, use_symlink=False):
+        """Check if the link was actually created successfully."""
+        if not os.path.exists(target_path):
+            return False
+        
+        try:
+            if use_symlink:
+                if os.path.islink(target_path):
+                    link_target = os.readlink(target_path)
+                    return os.path.abspath(link_target) == os.path.abspath(source_file)
+                return False
+            else:
+                if os.path.islink(target_path):
+                    return False
+                source_stat = os.stat(source_file)
+                target_stat = os.stat(target_path)
+                return (source_stat.st_ino == target_stat.st_ino and 
+                       source_stat.st_dev == target_stat.st_dev)
+        except Exception as e:
+            logger.debug(f"Error checking link creation success: {e}")
+            return False
+    
+    def create_file_link_with_sudo(self, source_file, target_dir, use_symlink=False, password=None):
+        """Create file link using sudo when regular creation fails."""
+        try:
+            if not os.path.exists(target_dir):
+                result = subprocess.run(
+                    ['sudo', '-S', 'mkdir', '-p', target_dir],
+                    input=f"{password}\n" if password else "",
+                    text=True,
+                    capture_output=True,
+                    timeout=10
+                )
+                if result.returncode != 0:
+                    logger.error(f"Failed to create target directory with sudo: {result.stderr}")
+                    return None
+            
+            filename = os.path.basename(source_file)
+            target_path = os.path.join(target_dir, filename)
+            
+            if os.path.exists(target_path):
+                if use_symlink:
+                    if os.path.islink(target_path):
+                        link_target = os.readlink(target_path)
+                        if os.path.abspath(link_target) == os.path.abspath(source_file):
+                            logger.info(f"Symbolic link already exists: {target_path}")
+                            self.record_created_link(target_path, source_file, True)
+                            return target_path
+                else:
+                    if not os.path.islink(target_path):
+                        source_stat = os.stat(source_file)
+                        target_stat = os.stat(target_path)
+                        if source_stat.st_ino == target_stat.st_ino and source_stat.st_dev == target_stat.st_dev:
+                            logger.info(f"Hard link already exists: {target_path}")
+                            self.record_created_link(target_path, source_file, False)
+                            return target_path
+                
+                counter = 1
+                base_name, ext = os.path.splitext(filename)
+                while os.path.exists(target_path):
+                    new_filename = f"{base_name}_{counter}{ext}"
+                    target_path = os.path.join(target_dir, new_filename)
+                    counter += 1
+            
+            if use_symlink:
+                cmd = ['sudo', '-S', 'ln', '-s', source_file, target_path]
+            else:
+                cmd = ['sudo', '-S', 'ln', source_file, target_path]
+            
+            result = subprocess.run(
+                cmd,
+                input=f"{password}\n" if password else "",
+                text=True,
+                capture_output=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                if self.check_link_creation_success(source_file, target_path, use_symlink):
+                    logger.info(f"Created {'symbolic' if use_symlink else 'hard'} link with sudo: {source_file} -> {target_path}")
+                    self.record_created_link(target_path, source_file, use_symlink)
+                    return target_path
+                else:
+                    logger.error(f"Link creation appeared successful but verification failed: {target_path}")
+                    return None
+            else:
+                logger.error(f"Failed to create link with sudo: {result.stderr}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Sudo command timed out")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to create file link with sudo: {e}")
+            return None
+    
+    def get_root_password(self):
+        """Prompt user for root password and cache it in memory."""
+        if self._cached_root_password is not None:
+            return self._cached_root_password
+        
+        password, ok = QInputDialog.getText(
+            self, 
+            "Root Password Required", 
+            "Link creation failed due to permissions.\nPlease enter root password to create link with elevated privileges:",
+            QLineEdit.EchoMode.Password
+        )
+        
+        if ok and password:
+            self._cached_root_password = password
+            return password
+        return None
+    
     def create_file_link(self, source_file, target_dir, use_symlink=False):
         """Create a hard link or symbolic link for the file in the target directory."""
         try:
@@ -283,13 +472,57 @@ class InputDialog(QWidget):
             else:
                 os.link(source_file, target_path)
                 logger.info(f"Created hard link: {source_file} -> {target_path}")
-            self.record_created_link(target_path, source_file, use_symlink)
             
-            return target_path
-        
+            # Verify the link was created successfully
+            if self.check_link_creation_success(source_file, target_path, use_symlink):
+                self.record_created_link(target_path, source_file, use_symlink)
+                return target_path
+            else:
+                logger.warning(f"Link creation failed verification for {source_file} -> {target_path}")
+                # Try with sudo if verification failed
+                password = self.get_root_password()
+                if password:
+                    logger.info(f"Attempting to create link with elevated privileges")
+                    sudo_result = self.create_file_link_with_sudo(source_file, target_dir, use_symlink, password)
+                    if sudo_result:
+                        return sudo_result
+                    else:
+                        logger.critical(f"Failed to create link even with elevated privileges: {source_file} -> {target_dir}")
+                        return None
+                else:
+                    logger.warning(f"User cancelled root password prompt for {source_file}")
+                    return None
+            
+        except PermissionError as e:
+            logger.warning(f"Permission denied creating link for {source_file}: {e}")
+            # Try with sudo for permission errors
+            password = self.get_root_password()
+            if password:
+                logger.info(f"Attempting to create link with elevated privileges due to permission error")
+                sudo_result = self.create_file_link_with_sudo(source_file, target_dir, use_symlink, password)
+                if sudo_result:
+                    return sudo_result
+                else:
+                    logger.critical(f"Failed to create link even with elevated privileges after permission error: {source_file} -> {target_dir}")
+                    return None
+            else:
+                logger.warning(f"User cancelled root password prompt after permission error for {source_file}")
+                return None
         except Exception as e:
-            logger.error(f"Failed to create file link: {e}")
-            return None
+            logger.warning(f"Failed to create file link for {source_file}: {e}")
+            # For other exceptions, also try with sudo in case it's a permission-related issue
+            password = self.get_root_password()
+            if password:
+                logger.info(f"Attempting to create link with elevated privileges due to error: {e}")
+                sudo_result = self.create_file_link_with_sudo(source_file, target_dir, use_symlink, password)
+                if sudo_result:
+                    return sudo_result
+                else:
+                    logger.critical(f"Failed to create link even with elevated privileges after error: {source_file} -> {target_dir}, original error: {e}")
+                    return None
+            else:
+                logger.warning(f"User cancelled root password prompt after error for {source_file}: {e}")
+                return None
     
     def record_created_link(self, link_path, source_path, is_symlink):
         """Record a created link in the config file."""
@@ -499,20 +732,102 @@ class InputDialog(QWidget):
 
     def detect_file_from_clipboard(self, mime_data):
         """Detect if the clipboard contains file data and return file path."""
+        logger.debug("detect_file_from_clipboard called")
         if not mime_data:
+            logger.debug("No mime data provided to detect_file_from_clipboard")
             return None
+        
+        logger.debug(f"Mime data formats in detect_file_from_clipboard: {mime_data.formats()}")
+        
+        # Handle GNOME file manager copied files format
+        if 'x-special/gnome-copied-files' in mime_data.formats():
+            try:
+                data = mime_data.data('x-special/gnome-copied-files')
+                if data:
+                    content = data.data().decode('utf-8', errors='ignore').strip()
+                    logger.debug(f"GNOME copied files content: {content}")
+                    
+                    # Parse the content - format is usually "copy\nfile:///path/to/file"
+                    lines = content.split('\n')
+                    for line in lines:
+                        if line.startswith('file://'):
+                            try:
+                                url = QUrl(line)
+                                if url.isLocalFile():
+                                    file_path = url.toLocalFile()
+                                    logger.debug(f"Found file from GNOME format: {file_path}")
+                                    if os.path.isfile(file_path):
+                                        logger.debug(f"Confirmed file exists: {file_path}")
+                                        return file_path
+                                    else:
+                                        logger.debug(f"File does not exist: {file_path}")
+                            except Exception as e:
+                                logger.debug(f"Error parsing GNOME file URL {line}: {e}")
+            except Exception as e:
+                logger.debug(f"Error processing x-special/gnome-copied-files: {e}")
+        
+        # Handle standard text/uri-list format
+        if 'text/uri-list' in mime_data.formats():
+            try:
+                data = mime_data.data('text/uri-list')
+                if data:
+                    content = data.data().decode('utf-8', errors='ignore').strip()
+                    logger.debug(f"URI list content: {content}")
+                    
+                    lines = content.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            try:
+                                url = QUrl(line)
+                                if url.isLocalFile():
+                                    file_path = url.toLocalFile()
+                                    logger.debug(f"Found file from URI list: {file_path}")
+                                    if os.path.isfile(file_path):
+                                        logger.debug(f"Confirmed file exists: {file_path}")
+                                        return file_path
+                                    else:
+                                        logger.debug(f"File does not exist: {file_path}")
+                            except Exception as e:
+                                logger.debug(f"Error parsing URI {line}: {e}")
+            except Exception as e:
+                logger.debug(f"Error processing text/uri-list: {e}")
+        
+        # Standard Qt URL handling
         if mime_data.hasUrls():
             urls = mime_data.urls()
+            logger.debug(f"Found {len(urls)} URLs in mime data")
             if urls:
-                for url in urls:
+                for i, url in enumerate(urls):
+                    logger.debug(f"Processing URL {i}: {url.toString()}")
                     if url.isLocalFile():
                         file_path = url.toLocalFile()
+                        logger.debug(f"URL is local file: {file_path}")
                         if os.path.isfile(file_path):
+                            logger.debug(f"Confirmed file exists: {file_path}")
                             return file_path
+                        else:
+                            logger.debug(f"File does not exist: {file_path}")
+                    else:
+                        logger.debug(f"URL is not a local file: {url.toString()}")
+        else:
+            logger.debug("No URLs found in mime data")
+            
+        # Handle plain text that might be a file path
         if mime_data.hasText():
             text = mime_data.text().strip()
-            return self.is_file_path(text)
-        return
+            logger.debug(f"Checking text content for file path: {text[:100]}...")
+            result = self.is_file_path(text)
+            if result:
+                logger.debug(f"Text content is a valid file path: {result}")
+                return result
+            else:
+                logger.debug("Text content is not a valid file path")
+        else:
+            logger.debug("No text content in mime data")
+            
+        logger.debug("No file detected from clipboard")
+        return None
     
     def create_file_mime_data(self, file_path):
         """Create QMimeData with proper file metadata."""
@@ -549,20 +864,25 @@ class InputDialog(QWidget):
             logger.debug(f"File linked successfully: {file_path} -> {linked_path}")
             return linked_path
         else:
-            logger.warning(f"Failed to link file: {file_path}")
+            logger.debug(f"File linking failed, returning original path: {file_path}")
             return text
     
     def handle_file_paste(self, mime_data):
         """Handle file paste immediately when detected."""
+        logger.debug("handle_file_paste called")
         if not self.settings.value("auto_file_link", False, bool):
+            logger.debug("auto_file_link is disabled, not handling file paste")
             return False
         
         file_path = self.detect_file_from_clipboard(mime_data)
         if not file_path:
+            logger.debug("No file path detected from clipboard")
             return False
         
+        logger.info(f"File detected from clipboard: {file_path}")
         target_dir = self.settings.value("target_directory", ROOT, str)
         use_symlink = self.settings.value("use_symlink", False, bool)
+        logger.debug(f"Target directory: {target_dir}, use_symlink: {use_symlink}")
         
         linked_path = self.create_file_link(file_path, target_dir, use_symlink)
         if linked_path:
@@ -588,7 +908,7 @@ class InputDialog(QWidget):
                 threading.Thread(target=delayed_enter, daemon=True).start()
             return True
         else:
-            logger.warning(f"Failed to link file during paste: {file_path}")
+            logger.debug(f"File paste handled but link creation failed for: {file_path}")
             return False
     
     def execute_enter_logic(self):
@@ -683,6 +1003,17 @@ class InputDialog(QWidget):
             self.move(screen_geometry.center() - self.rect().center())
         self.text_edit.setFocus()
         
+        # Trigger focus gained callback
+        if self.app:
+            plugin_manager = get_plugin_manager()
+            if plugin_manager:
+                context = CallbackContext(
+                    app=self.app, 
+                    logger=logger,
+                    data={'text': self.text_edit.toPlainText()}
+                )
+                plugin_manager.trigger_callbacks(CallbackPosition.ON_FOCUS_GAINED, context)
+        
         # Check if we should select all text based on restoration mode
         # This flag is set by restore_saved_state when content_only mode is used
         if hasattr(self, '_should_select_all') and self._should_select_all:
@@ -702,9 +1033,31 @@ class InputDialog(QWidget):
                         self.adjustSize()
                         return True
                     else:
+                        # Trigger enter pressed callback
+                        if self.app:
+                            plugin_manager = get_plugin_manager()
+                            if plugin_manager:
+                                context = CallbackContext(
+                                    app=self.app, 
+                                    logger=logger,
+                                    data={'text': self.text_edit.toPlainText()}
+                                )
+                                plugin_manager.trigger_callbacks(CallbackPosition.ON_ENTER_PRESSED, context)
+                        
                         self.execute_enter_logic()
                         return True
                 elif key_event.key() == Qt.Key.Key_Escape:
+                    # Trigger escape pressed callback
+                    if self.app:
+                        plugin_manager = get_plugin_manager()
+                        if plugin_manager:
+                            context = CallbackContext(
+                                app=self.app, 
+                                logger=logger,
+                                data={'text': self.text_edit.toPlainText()}
+                            )
+                            plugin_manager.trigger_callbacks(CallbackPosition.ON_ESCAPE_PRESSED, context)
+                    
                     self.hide_with_state_save(is_active=True)  # Active dismissal (Esc key)
                     return True
         return super().eventFilter(a0, a1)
@@ -725,6 +1078,18 @@ class InputDialog(QWidget):
         # Only hide if the dialog is still visible and doesn't have focus
         if self.isVisible() and not self.isActiveWindow() and not self.text_edit.hasFocus():
             logger.debug("Auto-hiding due to focus loss")
+            
+            # Trigger focus lost callback
+            if self.app:
+                plugin_manager = get_plugin_manager()
+                if plugin_manager:
+                    context = CallbackContext(
+                        app=self.app, 
+                        logger=logger,
+                        data={'text': self.text_edit.toPlainText()}
+                    )
+                    plugin_manager.trigger_callbacks(CallbackPosition.ON_FOCUS_LOST, context)
+            
             self.hide_with_state_save(is_active=False)  # Passive dismissal (focus loss)
     
     def adjustSize(self):
